@@ -1,0 +1,92 @@
+{
+    "forest ranger": {
+        "animals": [
+            "bear",
+            "owl",
+            "deer",
+            "fox"
+        ],
+        "used": false
+    },
+    "sea captain": {
+        "animals": [
+            "parrot",
+            "dolphin",
+            "octopus",
+            "seagull"
+        ],
+        "used": false
+    },
+    "librarian": {
+        "animals": [
+            "owl",
+            "mouse",
+            "turtle",
+            "cat"
+        ],
+        "used": false
+    },
+    "circus ringmaster": {
+        "animals": [
+            "lion",
+            "elephant",
+            "seal",
+            "monkey"
+        ],
+        "used": false
+    },
+    "chef": {
+        "animals": [
+            "pig",
+            "rabbit",
+            "chicken",
+            "cow"
+        ],
+        "used": false
+    },
+    "detective": {
+        "animals": [
+            "fox",
+            "crow",
+            "dog",
+            "ferret"
+        ],
+        "used": false
+    },
+    "astronaut": {
+        "animals": [
+            "owl",
+            "bat",
+            "falcon",
+            "raccoon"
+        ],
+        "used": false
+    },
+    "gardener": {
+        "animals": [
+            "turtle",
+            "snail",
+            "beetle",
+            "frog"
+        ],
+        "used": false
+    },
+    "firefighter": {
+        "animals": [
+            "dog",
+            "cat",
+            "horse",
+            "bear"
+        ],
+        "used": false
+    },
+    "inventor": {
+        "animals": [
+            "beaver",
+            "ant",
+            "octopus",
+            "crow"
+        ],
+        "used": false
+    }
+}
