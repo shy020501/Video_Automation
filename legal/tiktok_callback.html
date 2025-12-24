@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TikTok OAuth Callback</title>
+</head>
+<body>
+  <h2>Authorization completed</h2>
+  <p>You may now close this window.</p>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    console.log("TikTok OAuth code:", params.get("code"));
+  </script>
+</body>
+</html>
