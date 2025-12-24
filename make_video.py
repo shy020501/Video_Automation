@@ -3,8 +3,20 @@ import json
 import argparse
 import random
 import re
+import time
+import requests
+import numpy as np
+
+from moviepy import VideoFileClip, AudioFileClip, ImageClip, concatenate_videoclips
+from moviepy.audio.AudioClip import concatenate_audioclips
+from PIL import Image, ImageFilter, ImageDraw, ImageFont
+
 from openai import OpenAI
 import replicate
+import asyncio
+import aiohttp
+import aiofiles
+import beatoven_sdk
 
 DATA_PROMPT = """You are helping me build a dataset for generative video creation.
 
@@ -84,17 +96,27 @@ No sudden movements, no zooms, no shakes.
 Ultra-smooth cinematic motion with shallow depth of field.
 """
 
-def sanitize_file_name(output_path, job, animal, extension):
-    def slug(s):
-        s = s.strip().lower()
-        s = re.sub(r"\s+", "_", s)
-        s = re.sub(r"[^a-z0-9_]+", "", s)
-        return s
-    job_s = slug(job)
-    animal_s = slug(animal)
-    image_path = os.path.join(output_path, job_s)
-    os.makedirs(image_path, exist_ok=True)
-    return os.path.join(image_path, f"{job_s}_{animal_s}.{extension}")
+BGM_PROMPT = """Fast-paced, short intro.
+Anthropomorphic animals as a {job}.
+High-energy, exciting, confident.
+Electronic synths, punchy bass, driving drums.
+Modern EDM-inspired cinematic groove.
+No piano, no vocals, no lyrics.
+Target duration: about {duration} seconds (okay if longer; will be trimmed)."""
+
+FONT_PATH = "./data/fonts/PlayfairDisplay-VariableFont_wght.ttf"
+
+SUNO_GENERATE_URL = "https://api.sunoapi.org/api/v1/generate"
+SUNO_RECORD_INFO_URL = "https://api.sunoapi.org/api/v1/generate/record-info"
+
+def get_font(path: str, size: int):
+    return ImageFont.truetype(path, size=size)
+
+def sanitize_file_name(s: str):
+    s = s.strip().lower()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^a-z0-9_]+", "", s)
+    return s
 
 def find_unused_pair(data):
     return [
@@ -126,7 +148,7 @@ def create_data(client, data):
 
     data.update(new_data)
 
-def generate_image(job, animal, image_path):
+def generate_image(job: str, animal: str, image_path: str):
     prompt = IMAGE_PROMPT.format(job=job, animal=animal)
 
     output = replicate.run(
@@ -141,35 +163,189 @@ def generate_image(job, animal, image_path):
     with open(image_path, "wb") as f:
         f.write(img_file.read())
 
-def generate_video(job, animal, image_path, video_path):
+def generate_video(job: str, animal: str, image_path: str, video_path: str):
     prompt = VIDEO_PROMPT.format(job=job, animal=animal)
-    image = open(image_path, "rb")
 
-    output = replicate.run(
-        "bytedance/seedance-1-pro-fast",
-        input={
-            "image": image,
-            "prompt": prompt,
-            "fps": 24,
-            "duration": 4,
-            "aspect_ratio": "9:16",
-            "resolution": "720p",
-        }
-    )
+    with open(image_path, "rb") as image:
+        output = replicate.run(
+            "bytedance/seedance-1-pro-fast",
+            input={
+                "image": image,
+                "prompt": prompt,
+                "fps": 24,
+                "duration": 4,
+                "aspect_ratio": "9:16",
+                "resolution": "720p",
+            }
+        )
 
     with open(video_path, "wb") as file:
         file.write(output.read())
+
+def _draw_center_text(img: Image.Image, job: str, font_main: ImageFont.ImageFont, font_job: ImageFont.ImageFont):
+    draw = ImageDraw.Draw(img)
+    W, H = img.size
+
+    line1 = "What if ____ was a"
+    line2 = f"\"{job.capitalize()}\""
+
+    bbox1 = draw.textbbox((0, 0), line1, font=font_main)
+    w1, h1 = bbox1[2] - bbox1[0], bbox1[3] - bbox1[1]
+    x1 = (W - w1) // 2
+    y1 = int(H * 0.18)
+
+    bbox2 = draw.textbbox((0, 0), line2, font=font_job)
+    w2, h2 = bbox2[2] - bbox2[0], bbox2[3] - bbox2[1]
+    x2 = (W - w2) // 2
+    y2 = y1 + h1 + int(h2 * 0.3)
+
+    shadow1 = max(2, font_main.size // 18)
+    shadow2 = max(2, font_job.size // 18)
+
+    draw.text((x1 + shadow1, y1 + shadow1), line1, font=font_main, fill=(0, 0, 0))
+    draw.text((x1, y1), line1, font=font_main, fill=(255, 255, 255))
+
+    draw.text((x2 + shadow2, y2 + shadow2), line2, font=font_job, fill=(0, 0, 0))
+    draw.text((x2, y2), line2, font=font_job, fill=(255, 255, 255))
+
+    return img
+
+def _draw_top_label(img: Image.Image, text: str, font: ImageFont.ImageFont):
+    draw = ImageDraw.Draw(img)
+    W, H = img.size
+
+    bbox = draw.textbbox((0, 0), text, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+    x = (W - tw) // 2
+    y = int(H * 0.035)
+
+    shadow = max(2, font.size // 14)
+    draw.text((x + shadow, y + shadow), text, font=font, fill=(0, 0, 0))
+    draw.text((x, y), text, font=font, fill=(255, 255, 255))
+
+    return img
+
+def make_intro(first_video_path: str, job: str, intro_sec: float = 1.5):
+    base = VideoFileClip(first_video_path)
+    frame = base.get_frame(0)
+    img = Image.fromarray(frame).filter(ImageFilter.GaussianBlur(radius=12))
+
+    font_main = get_font(FONT_PATH, size=max(48, img.size[0] // 13))
+    font_job  = get_font(FONT_PATH, size=max(96, img.size[0] // 10))
+
+    img = _draw_center_text(img, job, font_main, font_job)
+
+    intro_clip = ImageClip(np.array(img)).with_duration(intro_sec).with_fps(base.fps)
+    base.close()
+    return intro_clip
+
+def overlay_top_caption(clip, caption: str):
+    font = get_font(FONT_PATH, size=max(54, int(clip.w / 12)))
+
+    def _fn(frame):
+        img = Image.fromarray(frame)
+        img = _draw_top_label(img, caption, font)
+        return np.array(img)
+
+    return clip.image_transform(_fn)
+
+def generate_bgm(
+    job: str,
+    duration: int,
+    audio_path: str
+):
+    prompt = BGM_PROMPT.format(job=job, duration=duration)
+    suno_api_key = os.environ.get("SUNO_API_KEY")
+
+    payload = {
+        "customMode": True,
+        "instrumental": True,
+        "model": "V4_5ALL",
+        "callBackUrl": "https://api.example.com/callback",
+        "prompt": prompt,
+        "style": "hybrid electronic cinematic short",
+        "title": f"{job} bgm",
+        "personaId": "",
+        "negativeTags": "vocals, piano, lyrics, singing, heavy metal",
+        "vocalGender": "",
+        "styleWeight": 0.65,
+        "weirdnessConstraint": 0.5,
+        "audioWeight": 0.65,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {suno_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    resp = requests.post(SUNO_GENERATE_URL, json=payload, headers=headers)
+    resp.raise_for_status()
+    task_id = resp.json()["data"]["taskId"]
+
+    print(f"[Suno] taskId = {task_id}")
+
+    audio_url = None
+    for _ in range(120):
+        time.sleep(5)
+
+        info_resp = requests.get(
+            SUNO_RECORD_INFO_URL,
+            params={"taskId": task_id},
+            headers=headers,
+        )
+        info_resp.raise_for_status()
+        info = info_resp.json()["data"]
+
+        if info["status"] == "SUCCESS":
+            suno_data = info["response"]["sunoData"]
+            audio_url = suno_data[0]["audioUrl"]
+            break
+
+    if audio_url is None:
+        raise RuntimeError("Suno BGM generation timed out")
+
+    print("[Suno] downloading:", audio_url)
+    r = requests.get(audio_url, stream=True)
+    r.raise_for_status()
+    with open(audio_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                f.write(chunk)
+
+    print("[Suno] BGM saved to:", audio_path)
+
+
+def loop_or_trim_audio_to_duration(audio_clip: AudioFileClip, target_duration: float):
+    if audio_clip.duration is None:
+        return audio_clip
+
+    if audio_clip.duration >= target_duration:
+        return audio_clip.subclipped(0, target_duration)
+
+    parts = []
+    t = 0.0
+    while t < target_duration:
+        remain = target_duration - t
+        if audio_clip.duration <= remain:
+            parts.append(audio_clip)
+            t += audio_clip.duration
+        else:
+            parts.append(audio_clip.subclipped(0, remain))
+            t += remain
+    return concatenate_audioclips(parts)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_path", type=str, default="./data")
     parser.add_argument("--output_path", type=str, default="./output")
     parser.add_argument("--concept", type=str, default="animal_with_job")
+    parser.add_argument("--category", type=str, default=None)
     args = parser.parse_args()
 
     os.makedirs(args.output_path, exist_ok=True)
 
-    # API setting $9.49
+    # API setting
     api_path = f"{args.data_path}/keys.json"
 
     with open(api_path, "r", encoding="utf-8") as f:
@@ -179,9 +355,12 @@ if __name__ == "__main__":
         raise RuntimeError("OPENAI_API_KEY is missing in keys.json")
     if "REPLICATE_API_TOKEN" not in keys:
         raise RuntimeError("REPLICATE_API_TOKEN is missing in keys.json")
+    if "SUNO_API_KEY" not in keys:
+        raise RuntimeError("SUNO_API_KEY is missing in keys.json")
 
     os.environ["OPENAI_API_KEY"] = keys["OPENAI_API_KEY"]
     os.environ["REPLICATE_API_TOKEN"] = keys["REPLICATE_API_TOKEN"]
+    os.environ["SUNO_API_KEY"] = keys["SUNO_API_KEY"]
     openai_client = OpenAI()
 
     print("Environment variables set:")
@@ -208,20 +387,68 @@ if __name__ == "__main__":
 
     # Image generation
     video_paths = []
-    job, animals = random.choice(unused_pairs)
+    if args.category is not None:
+        job, animals = args.category.replace('_', ' '), None
+        for _job, _animals in unused_pairs:
+            if job == _job:
+                animals = _animals
+                break
+        if animals is None:
+            raise RuntimeError(f"'{job}' does not exist in unused pair.")
+    else:
+        job, animals = random.choice(unused_pairs)
     
-    # For debugging
-    job = "chef"
-    animals = ["pig", "rabbit", "chicken", "cow"]
+    job_s = sanitize_file_name(job)
+    output_path = os.path.join(args.output_path, job_s)
+    os.makedirs(output_path, exist_ok=True)
     
     for animal in animals:
-        image_path = sanitize_file_name(args.output_path, job, animal, "jpg")
+        animal_s =  sanitize_file_name(animal)
+        image_path = os.path.join(output_path, f"{job_s}_{animal_s}.jpg")
         if not os.path.exists(image_path):
             generate_image(job, animal, image_path)
 
-        video_path = sanitize_file_name(args.output_path, job, animal, "mp4")
+        video_path = os.path.join(output_path, f"{job_s}_{animal_s}.mp4")
         if not os.path.exists(video_path):
             generate_video(job, animal, image_path, video_path)
         video_paths.append(video_path)
         
+    intro_clip = make_intro(video_paths[0], job, intro_sec=1.0)
 
+    animal_clips = []
+    for idx, (animal, vp) in enumerate(zip(animals, video_paths), start=1):
+        c = VideoFileClip(vp)
+        c = overlay_top_caption(c, f"{idx}. {animal.title()}")
+        animal_clips.append(c)
+
+    final = concatenate_videoclips([intro_clip] + animal_clips, method="compose")
+
+    bgm_path = os.path.join(output_path, f"{job_s}_bgm.mp3")
+    if not os.path.exists(bgm_path):
+        generate_bgm(
+            job=job,
+            duration=int(final.duration),
+            audio_path=bgm_path,
+        )
+        time.sleep(2.0)
+    audio = AudioFileClip(bgm_path)
+    audio = loop_or_trim_audio_to_duration(audio, final.duration + 0.2).subclipped(0, final.duration)
+    final = final.with_audio(audio)
+
+    final_path = os.path.join(output_path, f"{job_s}_final.mp4")
+    final.write_videofile(
+        final_path,
+        codec="libx264",
+        audio_codec="aac",
+        fps=24,
+        audio=True,
+        preset="medium",
+        threads=4,
+    )
+
+    audio.close()
+    final.close()
+    for c in animal_clips:
+        c.close()
+
+    print(f"[DONE] video saved to: {final_path}")
