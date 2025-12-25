@@ -179,4 +179,21 @@ if __name__ == "__main__":
     for c in animal_clips:
         c.close()
 
-    print(f"[DONE] video saved to: {final_path}")
+    print(f"[DONE] video saved to: {final_path}")    
+
+    title = f"What it ____ was a {job}"
+    description = f"AI-generated animal {job}"
+
+    video_id = upload_to_youtube(
+        file_path=final_path,
+        title=title,
+        description=description,
+        tags=["ai", "animals", "shorts", job],
+        # privacy_status="public",
+        privacy_status="private",
+    )
+    print(f"[Youtube] Uploaded: {video_id}")
+
+    # data[job]["used"] = True
+    # with open(data_path, "w", encoding="utf-8") as f:
+    #     json.dump(data, f, indent=4, ensure_ascii=False)
