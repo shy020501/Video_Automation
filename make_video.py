@@ -10,6 +10,7 @@ from utils.utils import sanitize_file_name, find_unused_pair
 from utils.bgm import generate_bgm, loop_or_trim_audio_to_duration
 from utils.video import generate_image, generate_video, make_intro, overlay_top_caption
 from utils.upload import upload_to_youtube
+from utils.notify import notify_crash
 
 DATA_PROMPT = """You are helping me build a dataset for generative video creation.
 
@@ -73,127 +74,155 @@ if __name__ == "__main__":
 
     os.makedirs(args.output_path, exist_ok=True)
 
-    # API setting
-    api_path = f"{args.data_path}/keys.json"
+    job = None
+    output_path = None
+    final_path = None
+    data_path = None
+    data = None
+    keys = {}
 
-    with open(api_path, "r", encoding="utf-8") as f:
-        keys = json.load(f)
+    try:
+        api_path = f"{args.data_path}/keys.json"
+        with open(api_path, "r", encoding="utf-8") as f:
+            keys = json.load(f)
 
-    if "OPENAI_API_KEY" not in keys:
-        raise RuntimeError("OPENAI_API_KEY is missing in keys.json")
-    if "REPLICATE_API_TOKEN" not in keys:
-        raise RuntimeError("REPLICATE_API_TOKEN is missing in keys.json")
-    if "SUNO_API_KEY" not in keys:
-        raise RuntimeError("SUNO_API_KEY is missing in keys.json")
+        for k in ["OPENAI_API_KEY", "REPLICATE_API_TOKEN", "SUNO_API_KEY"]:
+            if k not in keys:
+                raise RuntimeError(f"{k} is missing in keys.json")
 
-    os.environ["OPENAI_API_KEY"] = keys["OPENAI_API_KEY"]
-    os.environ["REPLICATE_API_TOKEN"] = keys["REPLICATE_API_TOKEN"]
-    os.environ["SUNO_API_KEY"] = keys["SUNO_API_KEY"]
-    openai_client = OpenAI()
+        os.environ["OPENAI_API_KEY"] = keys["OPENAI_API_KEY"]
+        os.environ["REPLICATE_API_TOKEN"] = keys["REPLICATE_API_TOKEN"]
+        os.environ["SUNO_API_KEY"] = keys["SUNO_API_KEY"]
 
-    print("Environment variables set:")
-    print("OPENAI_API_KEY =", "SET" if "OPENAI_API_KEY" in os.environ else "MISSING")
-    print("REPLICATE_API_TOKEN =", "SET" if "REPLICATE_API_TOKEN" in os.environ else "MISSING")
+        openai_client = OpenAI()
 
-    # Prompt check + generation
-    data_path = f"{args.data_path}/{args.concept}.json"
-    if not os.path.exists(data_path):
-        with open(data_path, "w", encoding="utf-8") as f:
-            json.dump({}, f, indent=4, ensure_ascii=False)
-        data = {}
-    else:
-        with open(data_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        # Prompt check + generation
+        data_path = f"{args.data_path}/{args.concept}.json"
+        if not os.path.exists(data_path):
+            with open(data_path, "w", encoding="utf-8") as f:
+                json.dump({}, f, indent=4, ensure_ascii=False)
+            data = {}
+        else:
+            with open(data_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
 
-    unused_pairs = find_unused_pair(data)
-
-    if not unused_pairs:
-        create_data(openai_client, data)
-        with open(data_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
         unused_pairs = find_unused_pair(data)
 
-    # Image generation
-    video_paths = []
-    if args.category is not None:
-        job, animals = args.category.replace('_', ' '), None
-        for _job, _animals in unused_pairs:
-            if job == _job:
-                animals = _animals
-                break
-        if animals is None:
-            raise RuntimeError(f"'{job}' does not exist in unused pair.")
-    else:
-        job, animals = random.choice(unused_pairs)
-    
-    job_s = sanitize_file_name(job)
-    output_path = os.path.join(args.output_path, job_s)
-    os.makedirs(output_path, exist_ok=True)
-    
-    for animal in animals:
-        animal_s =  sanitize_file_name(animal)
-        image_path = os.path.join(output_path, f"{job_s}_{animal_s}.jpg")
-        if not os.path.exists(image_path):
-            generate_image(job, animal, image_path)
+        if not unused_pairs:
+            create_data(openai_client, data)
+            with open(data_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            unused_pairs = find_unused_pair(data)
 
-        video_path = os.path.join(output_path, f"{job_s}_{animal_s}.mp4")
-        if not os.path.exists(video_path):
-            generate_video(job, animal, image_path, video_path)
-        video_paths.append(video_path)
-        
-    intro_clip = make_intro(video_paths[0], job, intro_sec=1.0)
+        # pick job/animals
+        if args.category is not None:
+            job = args.category.replace("_", " ")
+            animals = None
+            for _job, _animals in unused_pairs:
+                if job == _job:
+                    animals = _animals
+                    break
+            if animals is None:
+                raise RuntimeError(f"'{job}' does not exist in unused pair.")
+        else:
+            job, animals = random.choice(unused_pairs)
 
-    animal_clips = []
-    for idx, (animal, vp) in enumerate(zip(animals, video_paths), start=1):
-        c = VideoFileClip(vp)
-        c = overlay_top_caption(c, f"{idx}. {animal.title()}")
-        animal_clips.append(c)
+        job_s = sanitize_file_name(job)
+        output_path = os.path.join(args.output_path, job_s)
+        os.makedirs(output_path, exist_ok=True)
 
-    final = concatenate_videoclips([intro_clip] + animal_clips, method="compose")
+        # generate images/videos
+        video_paths = []
+        for animal in animals:
+            animal_s = sanitize_file_name(animal)
+            image_path = os.path.join(output_path, f"{job_s}_{animal_s}.jpg")
+            if not os.path.exists(image_path):
+                generate_image(job, animal, image_path)
 
-    bgm_path = os.path.join(output_path, f"{job_s}_bgm.mp3")
-    if not os.path.exists(bgm_path):
-        generate_bgm(
-            job=job,
-            duration=int(final.duration),
-            audio_path=bgm_path,
+            video_path = os.path.join(output_path, f"{job_s}_{animal_s}.mp4")
+            if not os.path.exists(video_path):
+                generate_video(job, animal, image_path, video_path)
+            video_paths.append(video_path)
+
+        intro_clip = make_intro(video_paths[0], job, intro_sec=1.0)
+
+        animal_clips = []
+        for idx, (animal, vp) in enumerate(zip(animals, video_paths), start=1):
+            c = VideoFileClip(vp)
+            c = overlay_top_caption(c, f"{idx}. {animal.title()}")
+            animal_clips.append(c)
+
+        final = concatenate_videoclips([intro_clip] + animal_clips, method="compose")
+
+        bgm_path = os.path.join(output_path, f"{job_s}_bgm.mp3")
+        if not os.path.exists(bgm_path):
+            generate_bgm(job=job, duration=int(final.duration), audio_path=bgm_path)
+            time.sleep(2.0)
+
+        audio = AudioFileClip(bgm_path)
+        audio = loop_or_trim_audio_to_duration(audio, final.duration + 0.2).subclipped(0, final.duration)
+        final = final.with_audio(audio)
+
+        final_path = os.path.join(output_path, f"{job_s}_final.mp4")
+        final.write_videofile(
+            final_path,
+            codec="libx264",
+            audio_codec="aac",
+            fps=24,
+            audio=True,
+            preset="medium",
+            threads=4,
         )
-        time.sleep(2.0)
-    audio = AudioFileClip(bgm_path)
-    audio = loop_or_trim_audio_to_duration(audio, final.duration + 0.2).subclipped(0, final.duration)
-    final = final.with_audio(audio)
 
-    final_path = os.path.join(output_path, f"{job_s}_final.mp4")
-    final.write_videofile(
-        final_path,
-        codec="libx264",
-        audio_codec="aac",
-        fps=24,
-        audio=True,
-        preset="medium",
-        threads=4,
-    )
+        # close resources
+        audio.close()
+        final.close()
+        for c in animal_clips:
+            c.close()
 
-    audio.close()
-    final.close()
-    for c in animal_clips:
-        c.close()
+        # upload
+        title = f"What it ____ was a {job}"
+        description = f"AI-generated animal {job}"
 
-    print(f"[DONE] video saved to: {final_path}")    
+        video_id = upload_to_youtube(
+            file_path=final_path,
+            title=title,
+            description=description,
+            tags=["ai", "animals", "shorts", job],
+            privacy_status="private",
+        )
+        print(f"[Youtube] Uploaded: {video_id}")
 
-    title = f"What it ____ was a {job}"
-    description = f"AI-generated animal {job}"
+        if job in data:
+            data[job]["used"] = True
+            with open(data_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            print(f"[DATA] marked '{job}' as used")
+        else:
+            print(f"[WARN] job '{job}' not found in data")
 
-    video_id = upload_to_youtube(
-        file_path=final_path,
-        title=title,
-        description=description,
-        tags=["ai", "animals", "shorts", job],
-        # privacy_status="public",
-        privacy_status="private",
-    )
-    print(f"[Youtube] Uploaded: {video_id}")
+    except Exception as e:
+        alert_to = keys.get("ALERT_EMAIL")
+        gmail_user = keys.get("GMAIL_USER")
+        gmail_pass = keys.get("GMAIL_APP_PASSWORD")
 
-    # data[job]["used"] = True
-    # with open(data_path, "w", encoding="utf-8") as f:
-    #     json.dump(data, f, indent=4, ensure_ascii=False)
+        if alert_to and gmail_user and gmail_pass:
+            try:
+                notify_crash(
+                    exc=e,
+                    context={
+                        "job": job,
+                        "output_path": output_path,
+                        "final_path": final_path,
+                        "data_path": data_path,
+                    },
+                    to_email=alert_to,
+                    from_email=gmail_user,
+                    app_password=gmail_pass,
+                )
+            except Exception as mail_err:
+                print(f"[WARN] failed to send crash email: {mail_err}")
+        else:
+            print("[WARN] email alert is not configured (ALERT_EMAIL/GMAIL_USER/GMAIL_APP_PASSWORD)")
+
+        raise
